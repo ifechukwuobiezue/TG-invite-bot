@@ -382,7 +382,13 @@ def run_bot():
     app.run_polling()
 
 if __name__ == "__main__":
-    # Flask runs in a background thread; bot runs in the main thread
+    import asyncio
+    # Python 3.10+ (especially 3.14) no longer auto-creates an event loop
+    # We must set one explicitly before run_polling() is called
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Flask runs in a background thread; bot owns the main thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     run_bot()
