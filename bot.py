@@ -84,6 +84,14 @@ def _kick_expired_sync(bot: Bot):
                 await bot.ban_chat_member(CHANNEL_ID, m["user_id"])
                 await bot.unban_chat_member(CHANNEL_ID, m["user_id"])
                 db.table("members").update({"removed": True}).eq("user_id", m["user_id"]).execute()
+                try:
+                    await bot.send_message(m["user_id"],
+                        "🚪 *Your subscription has expired.*\n\n"
+                        "You have been removed from Athena's Hub.\n\n"
+                        "To regain access, renew your subscription via /pay and send your receipt here. 🙏",
+                        parse_mode="Markdown")
+                except Exception:
+                    pass  # User may have blocked the bot
                 for admin in ADMIN_IDS:
                     await bot.send_message(admin,
                         f"🚪 *Evicted:* {m['username'] or m['user_id']} — subscription expired.",
