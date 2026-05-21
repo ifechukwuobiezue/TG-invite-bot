@@ -1,9 +1,11 @@
 import os
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+from flask import Flask, request as flask_request
 from supabase import create_client
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 load_dotenv()
@@ -12,6 +14,7 @@ BOT_TOKEN     = os.getenv("BOT_TOKEN")
 CHANNEL_ID    = int(os.getenv("CHANNEL_ID"))
 ADMIN_IDS     = [int(x) for x in os.getenv("ADMIN_IDS").split(",")]
 FLYER_FILE_ID = os.getenv("FLYER_FILE_ID")
+CRON_SECRET   = os.getenv("CRON_SECRET", "change-me-secret")  # Add this to your Render env vars
 db            = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY"))
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO)
@@ -27,48 +30,93 @@ PACKAGES = [
     {"name": "1 Year",   "duration_days": 365},
 ]
 
+# ── Flask app (keeps Render happy + receives cron pings) ─────────────────────
 
-# ── Scheduled: kick expired members ──────────────────────────────────────────
+flask_app = Flask(__name__)
 
-async def job_kick_expired(context):
-    now     = datetime.now(timezone.utc).isoformat()
-    expired = db.table("members").select("user_id, username").lte("expiry", now).eq("removed", False).execute().data
+@flask_app.route("/")
+def health():
+    return "Bot is alive ✅", 200
 
-    for m in expired:
-        try:
-            await context.bot.ban_chat_member(CHANNEL_ID, m["user_id"])
-            await context.bot.unban_chat_member(CHANNEL_ID, m["user_id"])
-            db.table("members").update({"removed": True}).eq("user_id", m["user_id"]).execute()
-            for admin in ADMIN_IDS:
-                await context.bot.send_message(admin,
-                    f"🚪 *Evicted:* {m['username'] or m['user_id']} — subscription expired.",
-                    parse_mode="Markdown")
-        except Exception as e:
-            logging.error(f"Kick failed for {m['user_id']}: {e}")
+@flask_app.route("/cron/kick", methods=["GET", "POST"])
+def cron_kick():
+    if flask_request.args.get("secret") != CRON_SECRET:
+        return "Unauthorized", 401
+    bot = Bot(token=BOT_TOKEN)
+    _kick_expired_sync(bot)
+    return "Kick job done", 200
+
+@flask_app.route("/cron/remind", methods=["GET", "POST"])
+def cron_remind():
+    if flask_request.args.get("secret") != CRON_SECRET:
+        return "Unauthorized", 401
+    bot = Bot(token=BOT_TOKEN)
+    _reminders_sync(bot)
+    return "Reminders job done", 200
 
 
-# ── Scheduled: send reminder DMs ─────────────────────────────────────────────
+# ── Sync job functions (called by Flask cron endpoints) ──────────────────────
 
-async def job_reminders(context):
-    now = datetime.now(timezone.utc)
+import asyncio
 
-    for days in [3, 1]:
-        start   = (now + timedelta(days=days, hours=-1)).isoformat()
-        end     = (now + timedelta(days=days, hours=1)).isoformat()
-        members = db.table("members").select("user_id, username, expiry").gte("expiry", start).lte("expiry", end).eq("removed", False).execute().data
+def run_async(coro):
+    """Run an async coroutine from a sync context."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, coro)
+                return future.result()
+        else:
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        return asyncio.run(coro)
 
-        for m in members:
-            expiry = datetime.fromisoformat(m["expiry"]).strftime("%Y-%m-%d")
+
+def _kick_expired_sync(bot: Bot):
+    async def _do():
+        now     = datetime.now(timezone.utc).isoformat()
+        expired = db.table("members").select("user_id, username").lte("expiry", now).eq("removed", False).execute().data
+
+        for m in expired:
             try:
-                await context.bot.send_message(m["user_id"],
-                    f"⏰ *Heads up!* Your subscription expires in *{days} day{'s' if days > 1 else ''}* ({expiry}).\n\n"
-                    f"Renew now → contact @AthenasHub 🙏",
-                    parse_mode="Markdown")
-            except:
+                await bot.ban_chat_member(CHANNEL_ID, m["user_id"])
+                await bot.unban_chat_member(CHANNEL_ID, m["user_id"])
+                db.table("members").update({"removed": True}).eq("user_id", m["user_id"]).execute()
                 for admin in ADMIN_IDS:
-                    await context.bot.send_message(admin,
-                        f"⚠️ Couldn't DM {m['username'] or m['user_id']} — sub expires in {days}d.",
+                    await bot.send_message(admin,
+                        f"🚪 *Evicted:* {m['username'] or m['user_id']} — subscription expired.",
                         parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Kick failed for {m['user_id']}: {e}")
+
+    asyncio.run(_do())
+
+
+def _reminders_sync(bot: Bot):
+    async def _do():
+        now = datetime.now(timezone.utc)
+
+        for days in [3, 1]:
+            start   = (now + timedelta(days=days, hours=-1)).isoformat()
+            end     = (now + timedelta(days=days, hours=1)).isoformat()
+            members = db.table("members").select("user_id, username, expiry").gte("expiry", start).lte("expiry", end).eq("removed", False).execute().data
+
+            for m in members:
+                expiry = datetime.fromisoformat(m["expiry"]).strftime("%Y-%m-%d")
+                try:
+                    await bot.send_message(m["user_id"],
+                        f"⏰ *Heads up!* Your subscription expires in *{days} day{'s' if days > 1 else ''}* ({expiry}).\n\n"
+                        f"Renew now → contact @AthenasHub 🙏",
+                        parse_mode="Markdown")
+                except Exception:
+                    for admin in ADMIN_IDS:
+                        await bot.send_message(admin,
+                            f"⚠️ Couldn't DM {m['username'] or m['user_id']} — sub expires in {days}d.",
+                            parse_mode="Markdown")
+
+    asyncio.run(_do())
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -172,7 +220,6 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pkg  = PACKAGES[pkg_idx]
     now  = datetime.now(timezone.utc)
 
-    # Support minute-based packages for testing
     if pkg.get("duration_minutes"):
         delta = timedelta(minutes=pkg["duration_minutes"])
     else:
@@ -242,7 +289,6 @@ async def callback_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_id = update.effective_user.id
 
-    # If this admin is waiting to give a deny reason, handle it
     if admin_id in ADMIN_STATE and ADMIN_STATE[admin_id]["action"] == "deny":
         state   = ADMIN_STATE.pop(admin_id)
         user_id = state["user_id"]
@@ -254,11 +300,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ *Payment Not Approved*\n\nReason: _{reason}_\n\n_For any issues please contact @AthenasHub for help_",
                 parse_mode="Markdown")
             await update.message.reply_text(f"Done. Reason sent to {name}.")
-        except:
+        except Exception:
             await update.message.reply_text(f"Couldn't DM {name} — they may not have started the bot.")
         return
 
-    # Everyone else gets the wrong input message
     await update.message.reply_text(
         "⚠️ We only accept a *screenshot* or *PDF* as payment proof.\n\n"
         "Go to your bank app, take a screenshot of the successful transaction, and send it here.",
@@ -299,37 +344,45 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    await job_kick_expired(context)
+    bot = Bot(token=BOT_TOKEN)
+    _kick_expired_sync(bot)
     await update.message.reply_text("✅ Expiry check done.")
 
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
 
-app = Application.builder().token(BOT_TOKEN).build()
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
 
-app.add_handler(CommandHandler("start",  cmd_start))
-app.add_handler(CommandHandler("pay",    cmd_pay))
-app.add_handler(CommandHandler("renew",  cmd_renew))
-app.add_handler(CommandHandler("list",   cmd_list))
-app.add_handler(CommandHandler("remove", cmd_remove))
-app.add_handler(CommandHandler("check",  cmd_check))
+def run_bot():
+    app = Application.builder().token(BOT_TOKEN).build()
 
-app.add_handler(MessageHandler(
-    (filters.PHOTO | filters.Document.PDF) & filters.ChatType.PRIVATE,
-    handle_receipt
-))
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("pay",    cmd_pay))
+    app.add_handler(CommandHandler("renew",  cmd_renew))
+    app.add_handler(CommandHandler("list",   cmd_list))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CommandHandler("check",  cmd_check))
 
-app.add_handler(MessageHandler(
-    filters.ChatType.PRIVATE & ~filters.COMMAND,
-    handle_text
-))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.PDF) & filters.ChatType.PRIVATE,
+        handle_receipt
+    ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_text
+    ))
 
-app.add_handler(CallbackQueryHandler(callback_approve, pattern=r"^approve:"))
-app.add_handler(CallbackQueryHandler(callback_deny,    pattern=r"^deny:"))
-app.add_handler(CallbackQueryHandler(callback_pkg,     pattern=r"^pkg:"))
+    app.add_handler(CallbackQueryHandler(callback_approve, pattern=r"^approve:"))
+    app.add_handler(CallbackQueryHandler(callback_deny,    pattern=r"^deny:"))
+    app.add_handler(CallbackQueryHandler(callback_pkg,     pattern=r"^pkg:"))
 
-app.job_queue.run_repeating(job_kick_expired, interval=60, first=10)
-app.job_queue.run_repeating(job_reminders,    interval=3600, first=120)
+    print("🤖 Bot polling...")
+    app.run_polling()
 
-print("🤖 Bot running...")
-app.run_polling()
+if __name__ == "__main__":
+    # Flask runs in a background thread; bot runs in the main thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    run_bot()
