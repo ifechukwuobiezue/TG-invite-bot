@@ -356,13 +356,11 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _kick_expired_sync(bot)
     await update.message.reply_text("✅ Expiry check done.")
 
-async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    if not context.args:
-        await update.message.reply_text("Send the image as a photo to this chat, then forward it to me.")
-        return
-    await update.message.reply_text("Just send the image directly here as a photo — I'll extract the file ID.")
+    file_id = update.message.photo[-1].file_id
+    await update.message.reply_text(f"`{file_id}`", parse_mode="Markdown")
 
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
@@ -393,7 +391,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(callback_approve, pattern=r"^approve:"))
     app.add_handler(CallbackQueryHandler(callback_deny,    pattern=r"^deny:"))
     app.add_handler(CallbackQueryHandler(callback_pkg,     pattern=r"^pkg:"))
-    app.add_handler(CommandHandler("getfileid", cmd_getfileid))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_admin_photo))
 
     print("🤖 Bot polling...")
     app.run_polling()
