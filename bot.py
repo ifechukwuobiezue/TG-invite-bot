@@ -381,6 +381,7 @@ def run_bot():
     app.add_handler(CommandHandler("list",   cmd_list))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(CommandHandler("check",  cmd_check))
+    app.add_handler(CommandHandler("getfileid", cmd_getfileid))
 
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.PDF) & filters.ChatType.PRIVATE,
@@ -394,7 +395,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(callback_approve, pattern=r"^approve:"))
     app.add_handler(CallbackQueryHandler(callback_deny,    pattern=r"^deny:"))
     app.add_handler(CallbackQueryHandler(callback_pkg,     pattern=r"^pkg:"))
-    app.add_handler(CommandHandler("getfileid", cmd_getfileid))
 
     print("🤖 Bot polling...")
     app.run_polling()
