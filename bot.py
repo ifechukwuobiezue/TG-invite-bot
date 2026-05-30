@@ -359,10 +359,10 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    with open(FLYER_PATH, "rb") as f:
-        msg = await update.message.reply_photo(photo=f)
-    file_id = msg.photo[-1].file_id
-    await update.message.reply_text(f"`{file_id}`", parse_mode="Markdown")
+    if not context.args:
+        await update.message.reply_text("Send the image as a photo to this chat, then forward it to me.")
+        return
+    await update.message.reply_text("Just send the image directly here as a photo — I'll extract the file ID.")
 
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
