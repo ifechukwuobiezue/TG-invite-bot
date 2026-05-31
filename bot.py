@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import asyncio
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from flask import Flask, request as flask_request
@@ -10,27 +11,25 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 load_dotenv()
 
-BOT_TOKEN     = os.getenv("BOT_TOKEN")
-CHANNEL_ID    = int(os.getenv("CHANNEL_ID"))
-ADMIN_IDS     = [int(x) for x in os.getenv("ADMIN_IDS").split(",")]
-FLYER_FILE_ID = os.getenv("FLYER_FILE_ID")
-CRON_SECRET   = os.getenv("CRON_SECRET", "change-me-secret")  # Add this to your Render env vars
-db            = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY"))
+BOT_TOKEN   = os.getenv("BOT_TOKEN")
+CHANNEL_ID  = int(os.getenv("CHANNEL_ID"))
+ADMIN_IDS   = [int(x) for x in os.getenv("ADMIN_IDS").split(",")]
+FLYER_PATH  = os.getenv("FLYER_PATH", "pricing.jpeg")
+CRON_SECRET = os.getenv("CRON_SECRET", "change-me-secret")
+db          = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY"))
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO)
 
-# Tracks which user an admin is currently approving or denying
-ADMIN_STATE = {}  # {admin_id: {"action": "approve"/"deny", "user_id": int, "username": str}}
+ADMIN_STATE = {}
 
-# Hardcoded packages — change here anytime, no Supabase needed
 PACKAGES = [
-    {"name": "1 Min",    "duration_days": 0,   "duration_minutes": 1},
+    {"name": "1 Min",    "duration_minutes": 1},
     {"name": "1 Month",  "duration_days": 30},
     {"name": "3 Months", "duration_days": 90},
     {"name": "1 Year",   "duration_days": 365},
 ]
 
-# ── Flask app (keeps Render happy + receives cron pings) ─────────────────────
+# ── Flask ─────────────────────────────────────────────────────────────────────
 
 flask_app = Flask(__name__)
 
@@ -55,24 +54,7 @@ def cron_remind():
     return "Reminders job done", 200
 
 
-# ── Sync job functions (called by Flask cron endpoints) ──────────────────────
-
-import asyncio
-
-def run_async(coro):
-    """Run an async coroutine from a sync context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        else:
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
-
+# ── Sync jobs ─────────────────────────────────────────────────────────────────
 
 def _kick_expired_sync(bot: Bot):
     async def _do():
@@ -91,7 +73,7 @@ def _kick_expired_sync(bot: Bot):
                         "To regain access, renew your subscription via /pay and send your receipt here. 🙏",
                         parse_mode="Markdown")
                 except Exception:
-                    pass  # User may have blocked the bot
+                    pass
                 for admin in ADMIN_IDS:
                     await bot.send_message(admin,
                         f"🚪 *Evicted:* {m['username'] or m['user_id']} — subscription expired.",
@@ -149,7 +131,11 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "After payment kindly send your receipt here.\n\n"
         "_For non-Nigerians, kindly DM @AthenasHub for a different payment method._"
     )
-    await update.message.reply_photo(photo=FLYER_FILE_ID, caption=caption, parse_mode="Markdown")
+    try:
+        with open(FLYER_PATH, "rb") as f:
+            await update.message.reply_photo(photo=f, caption=caption, parse_mode="Markdown")
+    except FileNotFoundError:
+        await update.message.reply_text(caption, parse_mode="Markdown")
 
 
 # ── /renew ────────────────────────────────────────────────────────────────────
@@ -160,6 +146,18 @@ async def cmd_renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Admin will review it and your access will be extended once approved ✅\n\n"
         "Need payment details? Use /pay",
         parse_mode="Markdown")
+
+
+# ── /getfileid ────────────────────────────────────────────────────────────────
+
+async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not update.message.photo:
+        await update.message.reply_text("Send the image with /getfileid as the caption.")
+        return
+    file_id = update.message.photo[-1].file_id
+    await update.message.reply_text(f"`{file_id}`", parse_mode="Markdown")
 
 
 # ── User sends receipt ────────────────────────────────────────────────────────
@@ -200,8 +198,7 @@ async def callback_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ADMIN_STATE[query.from_user.id] = {"action": "approve", "user_id": user_id, "username": name}
 
     keyboard = [[InlineKeyboardButton(
-        f"{p['name']} ({p['duration_days']}d)",
-        callback_data=f"pkg:{user_id}:{i}:{name}"
+        p["name"], callback_data=f"pkg:{user_id}:{i}:{name}"
     )] for i, p in enumerate(PACKAGES)]
 
     await query.edit_message_text(
@@ -225,14 +222,10 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ADMIN_STATE.pop(query.from_user.id, None)
 
-    pkg  = PACKAGES[pkg_idx]
-    now  = datetime.now(timezone.utc)
+    pkg = PACKAGES[pkg_idx]
+    now = datetime.now(timezone.utc)
 
-    if pkg.get("duration_minutes"):
-        delta = timedelta(minutes=pkg["duration_minutes"])
-    else:
-        delta = timedelta(days=pkg["duration_days"])
-
+    delta  = timedelta(minutes=pkg["duration_minutes"]) if pkg.get("duration_minutes") else timedelta(days=pkg["duration_days"])
     expiry = now + delta
 
     existing = db.table("members").select("expiry").eq("user_id", user_id).execute().data
@@ -240,8 +233,8 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         base   = datetime.fromisoformat(existing[0]["expiry"])
         expiry = (base if base > now else now) + delta
         db.table("members").update({
-            "expiry": expiry.isoformat(), "package": pkg["name"], "removed": False,
-            "username": name
+            "expiry": expiry.isoformat(), "package": pkg["name"],
+            "removed": False, "username": name
         }).eq("user_id", user_id).execute()
     else:
         db.table("members").insert({
@@ -251,14 +244,14 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         link = (await context.bot.create_chat_invite_link(
-            CHANNEL_ID, member_limit=1, name=f"user_{user_id}"
+            CHANNEL_ID, member_limit=1, creates_join_request=True, name=f"user_{user_id}"
         )).invite_link
 
         await context.bot.send_message(user_id,
             f"🎉 *Payment Approved!*\n\n"
-            f"Package: *{pkg['name'].capitalize()}* ({pkg['duration_days']} days)\n"
-            f"Expires: `{expiry.strftime('%Y-%m-%d')}`\n\n"
-            f"Your one-time invite link — works once, just for you:\n{link}\n\n"
+            f"Package: *{pkg['name']}*\n"
+            f"Expires: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
+            f"Tap the link below to request access — your request will be approved instantly:\n{link}\n\n"
             f"Welcome to Athena's Hub! 🙌",
             parse_mode="Markdown")
 
@@ -287,12 +280,12 @@ async def callback_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ADMIN_STATE[query.from_user.id] = {"action": "deny", "user_id": user_id, "username": name}
 
     await query.edit_message_text(
-        f"Type your reason for denying {name} and send it.\n"
+        f"Type your reason for denying {name} and send it here.\n"
         f"The bot will forward it to them.",
         parse_mode="Markdown")
 
 
-# ── Catch all text — handles deny reason OR wrong input ──────────────────────
+# ── Catch all text — deny reason OR wrong input ───────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_id = update.effective_user.id
@@ -302,10 +295,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = state["user_id"]
         name    = state["username"]
         reason  = update.message.text
-
         try:
             await context.bot.send_message(user_id,
-                f"❌ *Payment Not Approved*\n\nReason: _{reason}_\n\n_For any issues please contact @AthenasHub for help_",
+                f"❌ *Payment Not Approved*\n\nReason: _{reason}_\n\n"
+                f"_For any issues please contact @AthenasHub for help_",
                 parse_mode="Markdown")
             await update.message.reply_text(f"Done. Reason sent to {name}.")
         except Exception:
@@ -356,15 +349,6 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _kick_expired_sync(bot)
     await update.message.reply_text("✅ Expiry check done.")
 
-async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    if not update.message.photo:
-        await update.message.reply_text("Send the command again but attach the image to it.")
-        return
-    file_id = update.message.photo[-1].file_id
-    await update.message.reply_text(f"`{file_id}`", parse_mode="Markdown")
-
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
 
@@ -375,12 +359,12 @@ def run_flask():
 def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("pay",    cmd_pay))
-    app.add_handler(CommandHandler("renew",  cmd_renew))
-    app.add_handler(CommandHandler("list",   cmd_list))
-    app.add_handler(CommandHandler("remove", cmd_remove))
-    app.add_handler(CommandHandler("check",  cmd_check))
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("pay",       cmd_pay))
+    app.add_handler(CommandHandler("renew",     cmd_renew))
+    app.add_handler(CommandHandler("list",      cmd_list))
+    app.add_handler(CommandHandler("remove",    cmd_remove))
+    app.add_handler(CommandHandler("check",     cmd_check))
     app.add_handler(CommandHandler("getfileid", cmd_getfileid))
 
     app.add_handler(MessageHandler(
@@ -396,17 +380,15 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(callback_deny,    pattern=r"^deny:"))
     app.add_handler(CallbackQueryHandler(callback_pkg,     pattern=r"^pkg:"))
 
+    app.job_queue.run_repeating(lambda ctx: _kick_expired_sync(ctx.bot), interval=60,   first=10)
+    app.job_queue.run_repeating(lambda ctx: _reminders_sync(ctx.bot),    interval=3600, first=120)
+
     print("🤖 Bot polling...")
     app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    # Python 3.10+ (especially 3.14) no longer auto-creates an event loop
-    # We must set one explicitly before run_polling() is called
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
-    # Flask runs in a background thread; bot owns the main thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     run_bot()
