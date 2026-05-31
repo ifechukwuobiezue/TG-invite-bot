@@ -153,10 +153,9 @@ async def cmd_renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    if not update.message.photo:
-        await update.message.reply_text("Send the image with /getfileid as the caption.")
-        return
-    file_id = update.message.photo[-1].file_id
+    with open(FLYER_PATH, "rb") as f:
+        msg = await update.message.reply_photo(photo=f)
+    file_id = msg.photo[-1].file_id
     await update.message.reply_text(f"`{file_id}`", parse_mode="Markdown")
 
 
