@@ -131,11 +131,7 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "After payment kindly send your receipt here.\n\n"
         "_For non-Nigerians, kindly DM @AthenasHub for a different payment method._"
     )
-    try:
-        with open(FLYER_PATH, "rb") as f:
-            await update.message.reply_photo(photo=f, caption=caption, parse_mode="Markdown")
-    except FileNotFoundError:
-        await update.message.reply_text(caption, parse_mode="Markdown")
+    await update.message.reply_photo(photo=os.getenv("FLYER_FILE_ID"), caption=caption, parse_mode="Markdown")
 
 
 # ── /renew ────────────────────────────────────────────────────────────────────
