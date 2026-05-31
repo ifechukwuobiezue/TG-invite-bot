@@ -380,9 +380,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(callback_deny,    pattern=r"^deny:"))
     app.add_handler(CallbackQueryHandler(callback_pkg,     pattern=r"^pkg:"))
 
-    app.job_queue.run_repeating(lambda ctx: _kick_expired_sync(ctx.bot), interval=60,   first=10)
-    app.job_queue.run_repeating(lambda ctx: _reminders_sync(ctx.bot),    interval=3600, first=120)
-
     print("🤖 Bot polling...")
     app.run_polling()
 
