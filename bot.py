@@ -239,7 +239,7 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         link = (await context.bot.create_chat_invite_link(
-            CHANNEL_ID, member_limit=1, creates_join_request=True, name=f"user_{user_id}"
+            CHANNEL_ID, member_limit=1, name=f"user_{user_id}"
         )).invite_link
 
         await context.bot.send_message(user_id,
