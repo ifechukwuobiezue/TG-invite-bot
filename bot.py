@@ -112,6 +112,7 @@ def _reminders_sync(bot: Bot):
 # ── /start ────────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
     await update.message.reply_text(
         "👋 Welcome to *Athena's Hub*!\n\n"
         "🔷 *Payment:* Use /pay to see pricing and payment details.\n"
@@ -123,6 +124,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /pay ──────────────────────────────────────────────────────────────────────
 
 async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
     caption = (
         "💳 *Payment Details*\n\n"
         "🏦 *Bank:* Kuda Bank\n"
@@ -137,6 +139,7 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /renew ────────────────────────────────────────────────────────────────────
 
 async def cmd_renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
     await update.message.reply_text(
         "🔄 To renew, make your payment and send the receipt *right here*.\n\n"
         "Admin will review it and your access will be extended once approved ✅\n\n"
@@ -161,6 +164,7 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     name = f"@{user.username}" if user.username else user.first_name
 
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
     await update.message.reply_text(
         "✅ *Receipt received!*\n\nOur team will review shortly. You'll get your invite link here once approved.",
         parse_mode="Markdown")
@@ -219,19 +223,20 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pkg = PACKAGES[pkg_idx]
     now = datetime.now(timezone.utc)
-
-    delta  = timedelta(minutes=pkg["duration_minutes"]) if pkg.get("duration_minutes") else timedelta(days=pkg["duration_days"])
-    expiry = now + delta
-
+    delta = timedelta(minutes=pkg["duration_minutes"]) if pkg.get("duration_minutes") else timedelta(days=pkg["duration_days"])
+    
+    # Cumulative Renewal Logic
     existing = db.table("members").select("expiry").eq("user_id", user_id).execute().data
-    if existing:
+    if existing and existing[0]["expiry"]:
         base   = datetime.fromisoformat(existing[0]["expiry"])
+        # If expiry is in past, start from now, else start from base
         expiry = (base if base > now else now) + delta
         db.table("members").update({
             "expiry": expiry.isoformat(), "package": pkg["name"],
             "removed": False, "username": name
         }).eq("user_id", user_id).execute()
     else:
+        expiry = now + delta
         db.table("members").insert({
             "user_id": user_id, "username": name, "package": pkg["name"],
             "expiry": expiry.isoformat(), "added_at": now.isoformat(), "removed": False
@@ -246,7 +251,7 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎉 *Payment Approved!*\n\n"
             f"Package: *{pkg['name']}*\n"
             f"Expires: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
-            f"Tap the link below to request access — your request will be approved instantly:\n{link}\n\n"
+            f"Tap the link below to request access:\n{link}\n\n"
             f"Welcome to Athena's Hub! 🙌",
             parse_mode="Markdown")
 
@@ -311,6 +316,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
     now     = datetime.now(timezone.utc).isoformat()
     members = db.table("members").select("user_id, username, expiry, package").gt("expiry", now).eq("removed", False).order("expiry").execute().data
 
@@ -340,6 +346,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
     bot = Bot(token=BOT_TOKEN)
     _kick_expired_sync(bot)
     await update.message.reply_text("✅ Expiry check done.")
