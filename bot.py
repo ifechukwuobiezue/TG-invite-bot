@@ -14,7 +14,6 @@ load_dotenv()
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
 CHANNEL_ID  = int(os.getenv("CHANNEL_ID"))
 ADMIN_IDS   = [int(x) for x in os.getenv("ADMIN_IDS").split(",")]
-FLYER_PATH  = os.getenv("FLYER_PATH", "pricing.jpeg")
 CRON_SECRET = os.getenv("CRON_SECRET", "change-me-secret")
 db          = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY"))
 
@@ -52,6 +51,28 @@ def cron_remind():
     bot = Bot(token=BOT_TOKEN)
     _reminders_sync(bot)
     return "Reminders job done", 200
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def format_expiry_countdown(expiry_iso: str) -> str:
+    expiry = datetime.fromisoformat(expiry_iso)
+    delta  = expiry - datetime.now(timezone.utc)
+    if delta.total_seconds() <= 0:
+        return "Expired"
+    total_days = delta.days
+    if total_days >= 365:
+        years = total_days // 365
+        rem   = total_days % 365
+        return f"{years} year{'s' if years > 1 else ''}{', '+str(rem)+' day'+('s' if rem != 1 else '') if rem else ''}"
+    if total_days >= 30:
+        months = total_days // 30
+        days   = total_days % 30
+        return f"{months} month{'s' if months > 1 else ''}{', '+str(days)+' day'+('s' if days != 1 else '') if days else ''}"
+    if total_days > 0:
+        return f"{total_days} day{'s' if total_days > 1 else ''}"
+    hours = int(delta.total_seconds() // 3600)
+    return f"{hours} hour{'s' if hours != 1 else ''}"
 
 
 # ── Sync jobs ─────────────────────────────────────────────────────────────────
@@ -147,6 +168,36 @@ async def cmd_renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown")
 
 
+# ── /status ───────────────────────────────────────────────────────────────────
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await context.bot.send_chat_action(uid, "typing")
+
+    rows = db.table("members").select("package, expiry").eq("user_id", uid).eq("removed", False).execute().data
+
+    if not rows:
+        await update.message.reply_text("ℹ️ You don't have an active subscription.", parse_mode="Markdown")
+        return
+
+    row = rows[0]
+    expiry_dt = datetime.fromisoformat(row["expiry"]) if row.get("expiry") else None
+    if not expiry_dt:
+        status, expiry_str, countdown = "⏳ Pending", "N/A", "N/A"
+    else:
+        status = "✅ Active" if expiry_dt > datetime.now(timezone.utc) else "❌ Expired"
+        expiry_str = expiry_dt.strftime("%b %d, %Y")
+        countdown = format_expiry_countdown(row["expiry"])
+
+    await update.message.reply_text(
+        f"📊 *Your Subscription Status*\n\n"
+        f"📦 Plan: {row.get('package', 'N/A')}\n"
+        f"🔰 Status: {status}\n"
+        f"📅 Expires: {expiry_str}\n"
+        f"⏳ Time left: {countdown}",
+        parse_mode="Markdown")
+
+
 # ── /getfileid ────────────────────────────────────────────────────────────────
 
 async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -224,12 +275,11 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pkg = PACKAGES[pkg_idx]
     now = datetime.now(timezone.utc)
     delta = timedelta(minutes=pkg["duration_minutes"]) if pkg.get("duration_minutes") else timedelta(days=pkg["duration_days"])
-    
+
     # Cumulative Renewal Logic
     existing = db.table("members").select("expiry").eq("user_id", user_id).execute().data
     if existing and existing[0]["expiry"]:
         base   = datetime.fromisoformat(existing[0]["expiry"])
-        # If expiry is in past, start from now, else start from base
         expiry = (base if base > now else now) + delta
         db.table("members").update({
             "expiry": expiry.isoformat(), "package": pkg["name"],
@@ -317,18 +367,23 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
-    now     = datetime.now(timezone.utc).isoformat()
-    members = db.table("members").select("user_id, username, expiry, package").gt("expiry", now).eq("removed", False).order("expiry").execute().data
+
+    members = db.table("members").select("username, expiry, removed, package") \
+                                 .order("removed").execute().data
 
     if not members:
-        return await update.message.reply_text("No active members.")
+        await update.message.reply_text("📭 No members found.")
+        return
 
-    lines = ["*Active Members:*\n"]
+    lines = ["👥 *Member Ledger:*\n"]
     for m in members:
-        days_left = (datetime.fromisoformat(m["expiry"]) - datetime.now(timezone.utc)).days
-        pkg       = m.get("package") or "?"
-        name      = m["username"] or str(m["user_id"])
-        lines.append(f"• {name} — {pkg} ({days_left}d left)")
+        if m["removed"]:
+            status_str = "🚪 Removed"
+        else:
+            countdown = format_expiry_countdown(m["expiry"]) if m["expiry"] else "Pending"
+            status_str = f"✅ Active ({countdown} left)"
+
+        lines.append(f"• {m['username'] or 'Unknown'} — {m.get('package', '?')} | {status_str}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -364,6 +419,7 @@ def run_bot():
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("pay",       cmd_pay))
     app.add_handler(CommandHandler("renew",     cmd_renew))
+    app.add_handler(CommandHandler("status",    cmd_status))
     app.add_handler(CommandHandler("list",      cmd_list))
     app.add_handler(CommandHandler("remove",    cmd_remove))
     app.add_handler(CommandHandler("check",     cmd_check))
