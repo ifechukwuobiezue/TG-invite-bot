@@ -149,8 +149,8 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (
         "💳 *Payment Details*\n\n"
         "🏦 *Bank:* Kuda Bank\n"
-        "💰 *Account Number:* `2003661688`\n"
-        "👤 *Account Name:* Paul-Mary Chukwuka Omile\n\n"
+        "💰 *Account Number:* `3004015285`\n"
+        "👤 *Account Name:* Pradage Ventures\n\n"
         "After payment kindly send your receipt here.\n\n"
         "_For non-Nigerians, kindly DM @AthenasHub for a different payment method._"
     )
