@@ -213,7 +213,8 @@ async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    name = f"@{user.username}" if user.username else user.first_name
+    raw_name = f"@{user.username}" if user.username else (user.first_name or str(user.id))
+    name = raw_name.replace(":", "_")
 
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
     await update.message.reply_text(
