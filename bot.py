@@ -25,6 +25,7 @@ PACKAGES = [
     {"name": "1 Min",    "duration_minutes": 1},
     {"name": "1 Month",  "duration_days": 30},
     {"name": "3 Months", "duration_days": 90},
+    {"name": "6 Months", "duration_days": 180},
     {"name": "1 Year",   "duration_days": 365},
 ]
 
@@ -154,7 +155,7 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "After payment kindly send your receipt here.\n\n"
         "_For non-Nigerians, kindly DM @AthenasHub for a different payment method._"
     )
-    await update.message.reply_photo(photo=os.getenv("FLYER_FILE_ID"), caption=caption, parse_mode="Markdown")
+    await update.message.reply_photo(photo="AgACAgQAAxkBAAIG8mqoYaXHi4lKBYwmYY_ohCglByoMAAIwEGsbcfFAUZXCCDSlzoKlAQADAgADeQADPQQ", caption=caption, parse_mode="Markdown")
 
 
 # ── /renew ────────────────────────────────────────────────────────────────────
