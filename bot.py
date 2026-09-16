@@ -25,7 +25,6 @@ PACKAGES = [
     {"name": "1 Min",    "duration_minutes": 1},
     {"name": "1 Month",  "duration_days": 30},
     {"name": "3 Months", "duration_days": 90},
-    {"name": "6 Months", "duration_days": 180},
     {"name": "1 Year",   "duration_days": 365},
 ]
 
@@ -155,7 +154,7 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "After payment kindly send your receipt here.\n\n"
         "_For non-Nigerians, kindly DM @AthenasHub for a different payment method._"
     )
-    await update.message.reply_photo(photo="AgACAgQAAxkBAAIG-Gqoa58U_7ioxyGO4OxJbhqzTJ7yAAJDEGsbcfFAUebIZ8rRc-lPAQADAgADeQADPQQ", caption=caption, parse_mode="Markdown")
+    await update.message.reply_photo(photo=os.getenv("FLYER_FILE_ID"), caption=caption, parse_mode="Markdown")
 
 
 # ── /renew ────────────────────────────────────────────────────────────────────
@@ -280,7 +279,6 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Cumulative Renewal Logic
     existing = db.table("members").select("expiry").eq("user_id", user_id).execute().data
-    was_extended = bool(existing and existing[0]["expiry"] and datetime.fromisoformat(existing[0]["expiry"]) > now)
     if existing and existing[0]["expiry"]:
         base   = datetime.fromisoformat(existing[0]["expiry"])
         expiry = (base if base > now else now) + delta
@@ -300,23 +298,13 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             CHANNEL_ID, member_limit=1, name=f"user_{user_id}"
         )).invite_link
 
-        if was_extended:
-            dm_text = (
-                f"🎉 *Payment Approved!*\n\n"
-                f"Your subscription has been *extended by {pkg['name']}*.\n"
-                f"New expiry: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
-                f"Tap the link below to request access:\n{link}\n\n"
-                f"Thanks for staying with Athena's Hub! 🙌"
-            )
-        else:
-            dm_text = (
-                f"🎉 *Payment Approved!*\n\n"
-                f"Package: *{pkg['name']}*\n"
-                f"Expires: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
-                f"Tap the link below to request access:\n{link}\n\n"
-                f"Welcome to Athena's Hub! 🙌"
-            )
-        await context.bot.send_message(user_id, dm_text, parse_mode="Markdown")
+        await context.bot.send_message(user_id,
+            f"🎉 *Payment Approved!*\n\n"
+            f"Package: *{pkg['name']}*\n"
+            f"Expires: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
+            f"Tap the link below to request access:\n{link}\n\n"
+            f"Welcome to Athena's Hub! 🙌",
+            parse_mode="Markdown")
 
         await query.edit_message_text(
             f"✅ {name} approved on *{pkg['name']}*. Invite link sent.",
