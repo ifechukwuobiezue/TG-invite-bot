@@ -204,10 +204,23 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_getfileid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    with open(FLYER_PATH, "rb") as f:
-        msg = await update.message.reply_photo(photo=f)
-    file_id = msg.photo[-1].file_id
-    await update.message.reply_text(f"`{file_id}`", parse_mode="Markdown")
+    await update.message.reply_text("📸 Send me a photo or PDF and I'll return its file ID.")
+
+
+async def handle_getfileid_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        await update.message.reply_text(f"🖼️ *Photo File ID:*\n`{file_id}`", parse_mode="Markdown")
+    elif update.message.document:
+        file_id = update.message.document.file_id
+        await update.message.reply_text(f"📄 *Document File ID:*\n`{file_id}`", parse_mode="Markdown")
+
+
+async def handle_photo_or_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id in ADMIN_IDS:
+        await handle_getfileid_media(update, context)
+        return
+    await handle_receipt(update, context)
 
 
 # ── User sends receipt ────────────────────────────────────────────────────────
@@ -440,7 +453,7 @@ def run_bot():
 
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.PDF) & filters.ChatType.PRIVATE,
-        handle_receipt
+        handle_photo_or_doc
     ))
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND,
