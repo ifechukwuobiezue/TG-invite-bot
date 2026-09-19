@@ -76,6 +76,19 @@ def format_expiry_countdown(expiry_iso: str) -> str:
     return f"{hours} hour{'s' if hours != 1 else ''}"
 
 
+def escape_md(text) -> str:
+    """Escape Telegram legacy-Markdown special chars so raw usernames can't break parse_mode='Markdown' messages."""
+    text = str(text)
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def safe_cb_name(text: str, max_bytes: int = 40) -> str:
+    """Truncate a name to a safe byte length for use inside callback_data (Telegram's 64-byte hard limit)."""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+
 # ── Sync jobs ─────────────────────────────────────────────────────────────────
 
 def _kick_expired_sync(bot: Bot):
@@ -97,9 +110,12 @@ def _kick_expired_sync(bot: Bot):
                 except Exception:
                     pass
                 for admin in ADMIN_IDS:
-                    await bot.send_message(admin,
-                        f"🚪 *Evicted:* {m['username'] or m['user_id']} — subscription expired.",
-                        parse_mode="Markdown")
+                    try:
+                        await bot.send_message(admin,
+                            f"🚪 *Evicted:* {escape_md(m['username'] or m['user_id'])} — subscription expired.",
+                            parse_mode="Markdown")
+                    except Exception as notify_err:
+                        logging.error(f"Failed to notify admin {admin} of eviction: {notify_err}")
             except Exception as e:
                 logging.error(f"Kick failed for {m['user_id']}: {e}")
 
@@ -124,9 +140,12 @@ def _reminders_sync(bot: Bot):
                         parse_mode="Markdown")
                 except Exception:
                     for admin in ADMIN_IDS:
-                        await bot.send_message(admin,
-                            f"⚠️ Couldn't DM {m['username'] or m['user_id']} — sub expires in {days}d.",
-                            parse_mode="Markdown")
+                        try:
+                            await bot.send_message(admin,
+                                f"⚠️ Couldn't DM {escape_md(m['username'] or m['user_id'])} — sub expires in {days}d.",
+                                parse_mode="Markdown")
+                        except Exception as notify_err:
+                            logging.error(f"Failed to notify admin {admin} of reminder failure: {notify_err}")
 
     asyncio.run(_do())
 
@@ -236,16 +255,19 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown")
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Approve", callback_data=f"approve:{user.id}:{name}"),
-        InlineKeyboardButton("❌ Deny",    callback_data=f"deny:{user.id}:{name}")
+        InlineKeyboardButton("✅ Approve", callback_data=f"approve:{user.id}:{safe_cb_name(name)}"),
+        InlineKeyboardButton("❌ Deny",    callback_data=f"deny:{user.id}:{safe_cb_name(name)}")
     ]])
 
     for admin in ADMIN_IDS:
-        await context.bot.forward_message(admin, update.effective_chat.id, update.message.message_id)
-        await context.bot.send_message(admin,
-            f"👋 Hey chief! {name} just sent a payment receipt.\nReceipt is above 👆",
-            parse_mode="Markdown",
-            reply_markup=keyboard)
+        try:
+            await context.bot.forward_message(admin, update.effective_chat.id, update.message.message_id)
+            await context.bot.send_message(admin,
+                f"👋 Hey chief! {escape_md(name)} just sent a payment receipt.\nReceipt is above 👆",
+                parse_mode="Markdown",
+                reply_markup=keyboard)
+        except Exception as e:
+            logging.error(f"Failed to notify admin {admin} of receipt: {e}")
 
 
 # ── Admin taps Approve → show package buttons ─────────────────────────────────
@@ -267,7 +289,7 @@ async def callback_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )] for i, p in enumerate(PACKAGES)]
 
     await query.edit_message_text(
-        f"Select the package for {name}:",
+        f"Select the package for {escape_md(name)}:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -318,7 +340,7 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎉 *Payment Approved!*\n\n"
                 f"Your subscription has been *extended by {pkg['name']}*.\n"
                 f"New expiry: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
-                f"Tap the link below to request access:\n{link}\n\n"
+                f"Tap the link below to request access:\n{escape_md(link)}\n\n"
                 f"Thanks for staying with Athena's Hub! 🙌"
             )
         else:
@@ -326,18 +348,18 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎉 *Payment Approved!*\n\n"
                 f"Package: *{pkg['name']}*\n"
                 f"Expires: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
-                f"Tap the link below to request access:\n{link}\n\n"
+                f"Tap the link below to request access:\n{escape_md(link)}\n\n"
                 f"Welcome to Athena's Hub! 🙌"
             )
         await context.bot.send_message(user_id, dm_text, parse_mode="Markdown")
 
         await query.edit_message_text(
-            f"✅ {name} approved on *{pkg['name']}*. Invite link sent.",
+            f"✅ {escape_md(name)} approved on *{pkg['name']}*. Invite link sent.",
             parse_mode="Markdown")
 
     except Exception as e:
         await query.edit_message_text(
-            f"✅ Saved but couldn't DM {name}:\n`{e}`",
+            f"✅ Saved but couldn't DM {escape_md(name)}:\n`{e}`",
             parse_mode="Markdown")
 
 
@@ -356,7 +378,7 @@ async def callback_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ADMIN_STATE[query.from_user.id] = {"action": "deny", "user_id": user_id, "username": name}
 
     await query.edit_message_text(
-        f"Type your reason for denying {name} and send it here.\n"
+        f"Type your reason for denying {escape_md(name)} and send it here.\n"
         f"The bot will forward it to them.",
         parse_mode="Markdown")
 
@@ -373,7 +395,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason  = update.message.text
         try:
             await context.bot.send_message(user_id,
-                f"❌ *Payment Not Approved*\n\nReason: _{reason}_\n\n"
+                f"❌ *Payment Not Approved*\n\nReason: _{escape_md(reason)}_\n\n"
                 f"_For any issues please contact @AthenasHub for help_",
                 parse_mode="Markdown")
             await update.message.reply_text(f"Done. Reason sent to {name}.")
@@ -409,7 +431,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             countdown = format_expiry_countdown(m["expiry"]) if m["expiry"] else "Pending"
             status_str = f"✅ Active ({countdown} left)"
 
-        lines.append(f"• {m['username'] or 'Unknown'} — {m.get('package', '?')} | {status_str}")
+        lines.append(f"• {escape_md(m['username'] or 'Unknown')} — {m.get('package', '?')} | {status_str}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -417,11 +439,18 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS or not context.args:
         return
-    user_id = int(context.args[0])
-    await context.bot.ban_chat_member(CHANNEL_ID, user_id)
-    await context.bot.unban_chat_member(CHANNEL_ID, user_id)
-    db.table("members").update({"removed": True}).eq("user_id", user_id).execute()
-    await update.message.reply_text(f"✅ `{user_id}` removed.", parse_mode="Markdown")
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Usage: /remove [numeric user_id]")
+        return
+    try:
+        await context.bot.ban_chat_member(CHANNEL_ID, user_id)
+        await context.bot.unban_chat_member(CHANNEL_ID, user_id)
+        db.table("members").update({"removed": True}).eq("user_id", user_id).execute()
+        await update.message.reply_text(f"✅ `{user_id}` removed.", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Couldn't remove `{user_id}`:\n`{e}`", parse_mode="Markdown")
 
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
