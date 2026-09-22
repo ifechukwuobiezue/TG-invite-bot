@@ -288,8 +288,18 @@ async def callback_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p["name"], callback_data=f"pkg:{user_id}:{i}:{name}"
     )] for i, p in enumerate(PACKAGES)]
 
+    existing = db.table("members").select("package, expiry, removed").eq("user_id", user_id).execute().data
+    current_note = ""
+    if existing and existing[0].get("expiry") and not existing[0]["removed"]:
+        expiry_dt = datetime.fromisoformat(existing[0]["expiry"])
+        if expiry_dt > datetime.now(timezone.utc):
+            current_note = (
+                f"📌 *Currently on:* {existing[0].get('package', '?')} "
+                f"({format_expiry_countdown(existing[0]['expiry'])} left)\n\n"
+            )
+
     await query.edit_message_text(
-        f"Select the package for {escape_md(name)}:",
+        f"{current_note}Select the package for {escape_md(name)}:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -313,7 +323,28 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc)
     delta = timedelta(minutes=pkg["duration_minutes"]) if pkg.get("duration_minutes") else timedelta(days=pkg["duration_days"])
 
-    # Cumulative Renewal Logic
+    # Generate the invite link FIRST. Nothing touches the database until this succeeds,
+    # so a failure here can be safely retried without double-extending anyone's subscription.
+    try:
+        link = (await context.bot.create_chat_invite_link(
+            CHANNEL_ID, member_limit=1, name=f"user_{user_id}"
+        )).invite_link
+    except Exception:
+        try:
+            # Falls back to join-request mode — needed if the channel has "Approve New
+            # Members" enabled, which Telegram makes incompatible with member_limit.
+            link = (await context.bot.create_chat_invite_link(
+                CHANNEL_ID, creates_join_request=True, name=f"user_{user_id}"
+            )).invite_link
+        except Exception as e:
+            await query.edit_message_text(
+                f"⚠️ Couldn't generate an invite link — *nothing was saved*.\n\n"
+                f"`{e}`\n\n"
+                f"Check the channel's *Approve New Members* setting, then tap Approve and try again safely.",
+                parse_mode="Markdown")
+            return
+
+    # Cumulative Renewal Logic — only now that we have a working invite link
     existing = db.table("members").select("expiry").eq("user_id", user_id).execute().data
     was_extended = bool(existing and existing[0]["expiry"] and datetime.fromisoformat(existing[0]["expiry"]) > now)
     if existing and existing[0]["expiry"]:
@@ -330,36 +361,35 @@ async def callback_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "expiry": expiry.isoformat(), "added_at": now.isoformat(), "removed": False
         }).execute()
 
+    if was_extended:
+        dm_text = (
+            f"🎉 *Payment Approved!*\n\n"
+            f"Your subscription has been *extended by {pkg['name']}*.\n"
+            f"New expiry: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
+            f"Tap the link below to request access:\n{escape_md(link)}\n\n"
+            f"Thanks for staying with Athena's Hub! 🙌"
+        )
+    else:
+        dm_text = (
+            f"🎉 *Payment Approved!*\n\n"
+            f"Package: *{pkg['name']}*\n"
+            f"Expires: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
+            f"Tap the link below to request access:\n{escape_md(link)}\n\n"
+            f"Welcome to Athena's Hub! 🙌"
+        )
+
     try:
-        link = (await context.bot.create_chat_invite_link(
-            CHANNEL_ID, member_limit=1, name=f"user_{user_id}"
-        )).invite_link
-
-        if was_extended:
-            dm_text = (
-                f"🎉 *Payment Approved!*\n\n"
-                f"Your subscription has been *extended by {pkg['name']}*.\n"
-                f"New expiry: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
-                f"Tap the link below to request access:\n{escape_md(link)}\n\n"
-                f"Thanks for staying with Athena's Hub! 🙌"
-            )
-        else:
-            dm_text = (
-                f"🎉 *Payment Approved!*\n\n"
-                f"Package: *{pkg['name']}*\n"
-                f"Expires: `{expiry.strftime('%Y-%m-%d %H:%M UTC')}`\n\n"
-                f"Tap the link below to request access:\n{escape_md(link)}\n\n"
-                f"Welcome to Athena's Hub! 🙌"
-            )
         await context.bot.send_message(user_id, dm_text, parse_mode="Markdown")
-
         await query.edit_message_text(
             f"✅ {escape_md(name)} approved on *{pkg['name']}*. Invite link sent.",
             parse_mode="Markdown")
-
     except Exception as e:
+        # Already saved at this point — the DM just didn't land (e.g. user hasn't
+        # started the bot). Do NOT re-approve; hand the admin the link to forward manually.
         await query.edit_message_text(
-            f"✅ Saved but couldn't DM {escape_md(name)}:\n`{e}`",
+            f"✅ *Already saved* — do not tap Approve again.\n\n"
+            f"Couldn't DM {escape_md(name)} directly:\n`{e}`\n\n"
+            f"Send them this link manually:\n{escape_md(link)}",
             parse_mode="Markdown")
 
 
@@ -416,22 +446,36 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
 
-    members = db.table("members").select("username, expiry, removed, package") \
-                                 .order("removed").execute().data
+    members = db.table("members").select("username, expiry, removed, package").execute().data
 
     if not members:
         await update.message.reply_text("📭 No members found.")
         return
 
-    lines = ["👥 *Member Ledger:*\n"]
+    now = datetime.now(timezone.utc)
+    active, removed = [], []
     for m in members:
-        if m["removed"]:
-            status_str = "🚪 Removed"
-        else:
-            countdown = format_expiry_countdown(m["expiry"]) if m["expiry"] else "Pending"
-            status_str = f"✅ Active ({countdown} left)"
+        expiry_dt = datetime.fromisoformat(m["expiry"]) if m.get("expiry") else None
+        is_active = (not m["removed"]) and expiry_dt and expiry_dt > now
+        (active if is_active else removed).append((m, expiry_dt))
 
-        lines.append(f"• {escape_md(m['username'] or 'Unknown')} — {m.get('package', '?')} | {status_str}")
+    active.sort(key=lambda pair: pair[1])  # soonest-expiring first — needs attention soonest
+
+    lines = ["👥 *Member Ledger*"]
+    sn = 1
+
+    if active:
+        lines.append("\n*✅ Active*")
+        for m, _ in active:
+            countdown = format_expiry_countdown(m["expiry"])
+            lines.append(f"{sn}. {escape_md(m['username'] or 'Unknown')} — {m.get('package', '?')} | {countdown} left")
+            sn += 1
+
+    if removed:
+        lines.append("\n*🚪 Removed*")
+        for m, _ in removed:
+            lines.append(f"{sn}. {escape_md(m['username'] or 'Unknown')} — {m.get('package', '?')}")
+            sn += 1
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
