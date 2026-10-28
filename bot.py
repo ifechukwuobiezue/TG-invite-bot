@@ -461,20 +461,29 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     active.sort(key=lambda pair: pair[1])  # soonest-expiring first — needs attention soonest
 
-    lines = ["👥 *Member Ledger*"]
+    divider = "━━━━━━━━━━━━━━━━"
+    lines = ["👥 *MEMBER LEDGER*", divider]
     sn = 1
 
     if active:
-        lines.append("\n*✅ Active*")
+        lines.append("🟢 *ACTIVE MEMBERS*")
         for m, _ in active:
             countdown = format_expiry_countdown(m["expiry"])
-            lines.append(f"{sn}. {escape_md(m['username'] or 'Unknown')} — {m.get('package', '?')} | {countdown} left")
+            lines.append(
+                f"{sn}. 👤 {escape_md(m['username'] or 'Unknown')} — "
+                f"📦 {m.get('package', '?')} · ⏳ {countdown} left"
+            )
             sn += 1
 
     if removed:
-        lines.append("\n*🚪 Removed*")
+        if active:
+            lines.append(divider)
+        lines.append("🗃 *REMOVED MEMBERS*")
         for m, _ in removed:
-            lines.append(f"{sn}. {escape_md(m['username'] or 'Unknown')} — {m.get('package', '?')}")
+            lines.append(
+                f"{sn}. 👤 {escape_md(m['username'] or 'Unknown')} — "
+                f"📦 {m.get('package', '?')}"
+            )
             sn += 1
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
